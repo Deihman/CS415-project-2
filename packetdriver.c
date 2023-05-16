@@ -8,7 +8,8 @@ NetworkDevice *n = NULL;
 pthread_t receive = 0;
 pthread_t send = 0;
 FreePacketDescriptorStore *fpds = NULL;
-BoundedBuffer *buffer = NULL;
+BoundedBuffer *in_buffer = NULL;
+BoundedBuffer *out_buffer = NULL;
 
 
 /* thread helpers */
@@ -22,6 +23,7 @@ static void *receive_thread(void *arg)
         n->registerPD(n, pd);
         n->awaitIncomingPacket(n);
         printf("[RecThread> received packet for pid %d\n", getPID(pd));
+        in_buffer->blockingWrite(in_buffer, pd);
         fpds->blockingPut(fpds, pd);
     }
     return NULL;
@@ -30,20 +32,29 @@ static void *receive_thread(void *arg)
 static void *send_thread(void *arg)
 {
     PacketDescriptor *pd = NULL;
+    int i = 0;
+
     while (1)
     {
-        /* watch for packet descriptor to be sent */
-        for (int i = 0; i < 3; i++)
+        out_buffer->blockingRead(out_buffer, (void **)&pd);
+        for (i = 0; i < 3; i++)
         {
-            printf("Packet from PID %d send attempt %d\n", getPID(pd), i + 1);
+            printf("[SendThread> Packet from PID %d send attempt %d\n", 
+                    getPID(pd), i + 1);
             if (n->sendPacket(n, pd))
             {
-                printf("Packet sent from PID %d\n", getPID(pd));
-                return;
+                printf("[SendThread> Packet sent from PID %d\n", 
+                        getPID(pd));
+                break;
             }
         }
-        printf("Packet send from PID %d failed\n", getPID(pd));
+
+        if (i == 3)
+            printf("[SendThread> Packet send failed from PID %d\n", 
+                    getPID(pd));
     }
+
+    return NULL;
 }
 
 /* cool init thingy */
@@ -55,7 +66,8 @@ void init_packet_driver(NetworkDevice               *nd,
     *fpds_ptr = FreePacketDescriptorStore_create(mem_start, mem_length);
     fpds = *fpds_ptr;
     n = nd;
-    buffer = BoundedBuffer_create(MAX_PID+1);
+    in_buffer = BoundedBuffer_create(MAX_PID+1);
+    out_buffer = BoundedBuffer_create(MAX_PID+1);
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_create(&receive, &attr, &receive_thread, NULL);
