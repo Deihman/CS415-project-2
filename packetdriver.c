@@ -22,6 +22,7 @@ static void *receive_thread(void *arg)
         n->registerPD(n, pd);
         n->awaitIncomingPacket(n);
         printf("[RecThread> received data for pid %d\n", getPID(pd));
+        buffer->blockingWrite(buffer, pd);
         fpds->blockingPut(fpds, pd);
     }
     return NULL;
