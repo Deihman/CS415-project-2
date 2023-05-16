@@ -21,7 +21,8 @@ static void *receive_thread(void *arg)
         initPD(pd);
         n->registerPD(n, pd);
         n->awaitIncomingPacket(n);
-        printf("[RecThread> received data for pid %d\n", getPID(pd));
+        printf("[RecThread> received packet for pid %d\n", getPID(pd));
+        buffer->blockingWrite(buffer, pd);
         fpds->blockingPut(fpds, pd);
     }
     return NULL;
@@ -29,9 +30,22 @@ static void *receive_thread(void *arg)
 
 static void *send_thread(void *arg)
 {
-
+    PacketDescriptor *pd = NULL;
+    while (1)
+    {
+        /* watch for packet descriptor to be sent */
+        for (int i = 0; i < 3; i++)
+        {
+            printf("Packet from PID %d send attempt %d\n", getPID(pd), i + 1);
+            if (n->sendPacket(n, pd))
+            {
+                printf("Packet sent from PID %d\n", getPID(pd));
+                return;
+            }
+        }
+        printf("Packet send from PID %d failed\n", getPID(pd));
+    }
 }
-
 
 /* cool init thingy */
 void init_packet_driver(NetworkDevice               *nd, 
@@ -46,6 +60,7 @@ void init_packet_driver(NetworkDevice               *nd,
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_create(&receive, &attr, &receive_thread, NULL);
+    pthread_create(&send, &attr, &send_thread, NULL);
 }
 
 
