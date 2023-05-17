@@ -4,88 +4,127 @@
 #include <pthread.h>
 #include <stdio.h>
 
+#define UNUSED __attribute__((unused))
+#define BB_SIZE 1
+
 NetworkDevice *n = NULL;
 pthread_t receive = 0;
 pthread_t send = 0;
 FreePacketDescriptorStore *fpds = NULL;
-BoundedBuffer *in_buffer = NULL;
-BoundedBuffer *out_buffer = NULL;
+BoundedBuffer *in_buffer[MAX_PID + 1];
+BoundedBuffer *out_buffer[MAX_PID + 1];
 
+pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* thread helpers */
-static void *receive_thread(void *arg)
+void wait_for_signal()
 {
-    PacketDescriptor *pd = NULL;
-    while (1)
-    {
-        fpds->blockingGet(fpds, &pd);
-        initPD(pd);
-        n->registerPD(n, pd);
-        n->awaitIncomingPacket(n);
-        printf("[RecThread> received packet for pid %d\n", getPID(pd));
-        in_buffer->blockingWrite(in_buffer, pd);
-        fpds->blockingPut(fpds, pd);
-    }
-    return NULL;
+        pthread_mutex_lock(&mutex);
+        pthread_cond_wait(&cond, &mutex);
+        pthread_mutex_unlock(&mutex);
 }
 
-static void *send_thread(void *arg)
+void send_signal()
 {
-    PacketDescriptor *pd = NULL;
-    int i = 0;
+        pthread_mutex_lock(&mutex);
+        pthread_cond_signal(&cond);
+        pthread_mutex_unlock(&mutex);
+}
 
-    while (1)
-    {
-        out_buffer->blockingRead(out_buffer, (void **)&pd);
-        for (i = 0; i < 3; i++)
+/* thread functions */
+static void *receive_thread(UNUSED void *arg)
+{
+        PacketDescriptor *pd = NULL;
+        while (1)
         {
-            printf("[SendThread> Packet from PID %d send attempt %d\n", 
-                    getPID(pd), i + 1);
-            if (n->sendPacket(n, pd))
-            {
-                printf("[SendThread> Packet sent from PID %d\n", 
-                        getPID(pd));
-                break;
-            }
+                fpds->blockingGet(fpds, &pd);
+                initPD(pd);
+                n->registerPD(n, pd);
+                n->awaitIncomingPacket(n);
+                pid_t pid = getPID(pd);
+
+                BoundedBuffer *bb = in_buffer[pid];
+                bb->blockingWrite(bb, pd);
+
+                fpds->blockingPut(fpds, pd);
+        }
+        return NULL;
+}
+
+static void *send_thread(UNUSED void *arg)
+{
+        PacketDescriptor *pd = NULL;
+        int j = 0;
+
+        while (1)
+        {
+                wait_for_signal();
+                for (int i = 1; i < MAX_PID + 1; i++)
+                {
+                        BoundedBuffer *bb = out_buffer[i];
+
+                        if (!bb->nonblockingRead(bb, (void **)&pd))
+                                continue;
+
+                        for (j = 0; j < 3; j++)
+                                if (n->sendPacket(n, pd))
+                                        break;
+                }
         }
 
-        if (i == 3)
-            printf("[SendThread> Packet send failed from PID %d\n", 
-                    getPID(pd));
-    }
-
-    return NULL;
+        return NULL;
 }
 
 /* cool init thingy */
-void init_packet_driver(NetworkDevice               *nd, 
-                        void                        *mem_start, 
-                        unsigned long               mem_length,
+void init_packet_driver(NetworkDevice *nd,
+                        void *mem_start,
+                        unsigned long mem_length,
                         FreePacketDescriptorStore **fpds_ptr)
 {
-    *fpds_ptr = FreePacketDescriptorStore_create(mem_start, mem_length);
-    fpds = *fpds_ptr;
-    n = nd;
-    in_buffer = BoundedBuffer_create(MAX_PID+1);
-    out_buffer = BoundedBuffer_create(MAX_PID+1);
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_create(&receive, &attr, &receive_thread, NULL);
-    pthread_create(&send, &attr, &send_thread, NULL);
+        *fpds_ptr = FreePacketDescriptorStore_create(mem_start, mem_length);
+        fpds = *fpds_ptr;
+        n = nd;
+        for (int i = 0; i < MAX_PID + 1; i++)
+        {
+                in_buffer[i] = BoundedBuffer_create(BB_SIZE);
+                out_buffer[i] = BoundedBuffer_create(BB_SIZE);
+        }
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_create(&receive, &attr, &receive_thread, NULL);
+        pthread_create(&send, &attr, &send_thread, NULL);
 }
-
 
 /* sending stuff */
 void blocking_send_packet(PacketDescriptor *pd)
-{ printf("[BlockSend> blocking_send from %d to %p\n", getPID(pd), getDestination(pd)); }
+{
+        BoundedBuffer *bb = out_buffer[getPID(pd)];
+        bb->blockingWrite(bb, pd);
+        send_signal();
+}
 
-int  nonblocking_send_packet(PacketDescriptor *pd)
-{ printf("[NonblockSend> nonblocking_send from %d to %p\n", getPID(pd), getDestination(pd));return 0; }
+int nonblocking_send_packet(PacketDescriptor *pd)
+{
+        BoundedBuffer *bb = out_buffer[getPID(pd)];
 
+        int yeah = bb->nonblockingWrite(bb, pd);
+
+        if (yeah)
+                send_signal();
+
+        return yeah;
+}
 
 /* reveiving stuff */
 void blocking_get_packet(PacketDescriptor **pd, PID pid)
-{ printf("[BlockGet> blocking_get from %d\n", pid); *pd = NULL; }
+{
+        BoundedBuffer *bb = in_buffer[pid];
+        bb->blockingRead(bb, (void **)pd);
+}
 
-int  nonblocking_get_packet(PacketDescriptor **pd, PID pid)
-{ printf("[NonblockGet> nonblocking_get from %d\n", pid); *pd = NULL; return 0; }
+int nonblocking_get_packet(PacketDescriptor **pd, PID pid)
+{
+        BoundedBuffer *bb = in_buffer[pid];
+        return bb->nonblockingRead(bb, (void **)pd);
+}
